@@ -1,0 +1,13 @@
+LIBRARY VPR_Signalway_HLJ
+ EXPORTS 
+
+VLPR_Init @1
+VLPR_Deinit @2
+VLPR_Login @3
+VLPR_Logout @4
+VLPR_SetResultCallBack @5
+VLPR_SetStatusCallBack @6
+VLPR_ManualSnap @7
+VLPR_GetStatus @8
+VLPR_GetStatusMsg @9
+VLPR_GetVersion @10
