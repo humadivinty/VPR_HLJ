@@ -1,6 +1,11 @@
 #include "stdafx.h"
 #include "ToolFunction.h"
 #include <string>
+#include<shellapi.h>
+
+#include <gdiplus.h>
+using namespace Gdiplus;
+#pragma  comment(lib, "gdiplus.lib")
 
 TiXmlElement SelectElementByName(const char* InputInfo, char* pName, int iXMLType)
 {
@@ -169,6 +174,27 @@ bool Tool_IsFileExist(const char* FilePath)
 	return bRet;
 }
 
+bool Tool_MakeDir(const char* chImgPath)
+{
+    if (NULL == chImgPath)
+    {
+        //WriteLog("the path is null ,Create Dir failed.");
+        return false;
+    }
+    std::string tempFile(chImgPath);
+    size_t iPosition = tempFile.rfind("\\");
+    std::string tempDir = tempFile.substr(0, iPosition + 1);
+    if (MakeSureDirectoryPathExists(tempDir.c_str()))
+    {
+        return true;
+    }
+    else
+    {
+        //WriteLog("Create Dir failed.");
+        return false;
+    }
+}
+
 long Tool_GetFileSize(const char *FileName)
 {
 	//FILE* tmpFile = fopen(FileName, "rb");
@@ -301,4 +327,280 @@ bool PingIPaddress(const char* IpAddress)
 	{
 		return false;
 	}
+}
+
+bool Tool_Img_ScaleJpg(PBYTE pbSrc, int iSrcLen, PBYTE pbDst, DWORD *iDstLen, int iDstWidth, int iDstHeight, int compressQuality)
+{
+    if (pbSrc == NULL || iSrcLen <= 0)
+    {
+        return false;
+    }
+    if (pbDst == NULL || iDstLen == NULL || *iDstLen <= 0)
+    {
+        return false;
+    }
+    if (iDstWidth <= 0 || iDstHeight <= 0)
+    {
+        return false;
+    }
+
+    // init gdi+
+    ULONG_PTR gdiplusToken = NULL;
+    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
+
+    // 创建流
+    IStream *pstmp = NULL;
+    CreateStreamOnHGlobal(NULL, TRUE, &pstmp);
+    if (pstmp == NULL)
+    {
+        GdiplusShutdown(gdiplusToken);
+        gdiplusToken = NULL;
+        return false;
+    }
+
+    // 初始化流
+    LARGE_INTEGER liTemp = { 0 };
+    ULARGE_INTEGER uLiZero = { 0 };
+    pstmp->Seek(liTemp, STREAM_SEEK_SET, NULL);
+    pstmp->SetSize(uLiZero);
+
+    // 将图像放入流中
+    ULONG ulRealSize = 0;
+    pstmp->Write(pbSrc, iSrcLen, &ulRealSize);
+
+    // 从流创建位图
+    Bitmap bmpSrc(pstmp);
+    Bitmap bmpDst(iDstWidth, iDstHeight, PixelFormat24bppRGB);
+
+    // 创建画图对象
+    Graphics grDraw(&bmpDst);
+
+    // 绘图
+    grDraw.DrawImage(&bmpSrc, 0, 0, bmpSrc.GetWidth(), bmpSrc.GetHeight());
+    if (Ok != grDraw.GetLastStatus())
+    {
+        pstmp->Release();
+        pstmp = NULL;
+        GdiplusShutdown(gdiplusToken);
+        gdiplusToken = NULL;
+        return false;
+    }
+
+    // 创建输出流
+    IStream* pStreamOut = NULL;
+    if (CreateStreamOnHGlobal(NULL, TRUE, &pStreamOut) != S_OK)
+    {
+        pstmp->Release();
+        pstmp = NULL;
+        GdiplusShutdown(gdiplusToken);
+        gdiplusToken = NULL;
+        return false;
+    }
+
+    CLSID jpgClsid;
+    Tool_GetEncoderClsid(L"image/jpeg", &jpgClsid);
+
+    // 初始化输出流
+    pStreamOut->Seek(liTemp, STREAM_SEEK_SET, NULL);
+    pStreamOut->SetSize(uLiZero);
+
+    // 将位图按照JPG的格式保存到输出流中
+    int iQuality = compressQuality % 100;
+    EncoderParameters encoderParameters;
+    encoderParameters.Count = 1;
+    encoderParameters.Parameter[0].Guid = EncoderQuality;
+    encoderParameters.Parameter[0].Type = EncoderParameterValueTypeLong;
+    encoderParameters.Parameter[0].NumberOfValues = 1;
+    encoderParameters.Parameter[0].Value = &iQuality;
+    bmpDst.Save(pStreamOut, &jpgClsid, &encoderParameters);
+    //bmpDst.Save(pStreamOut, &jpgClsid, 0);
+
+    // 获取输出流大小
+    bool bRet = false;
+    ULARGE_INTEGER libNewPos = { 0 };
+    pStreamOut->Seek(liTemp, STREAM_SEEK_END, &libNewPos);      // 将流指针指向结束位置，从而获取流的大小 
+    if (*iDstLen < (int)libNewPos.LowPart)                     // 用户分配的缓冲区不足
+    {
+        *iDstLen = libNewPos.LowPart;
+        bRet = false;
+    }
+    else
+    {
+        pStreamOut->Seek(liTemp, STREAM_SEEK_SET, NULL);                   // 将流指针指向开始位置
+        pStreamOut->Read(pbDst, libNewPos.LowPart, &ulRealSize);           // 将转换后的JPG图片拷贝给用户
+        *iDstLen = ulRealSize;
+        bRet = true;
+    }
+
+
+    // 释放内存
+    if (pstmp != NULL)
+    {
+        pstmp->Release();
+        pstmp = NULL;
+    }
+    if (pStreamOut != NULL)
+    {
+        pStreamOut->Release();
+        pStreamOut = NULL;
+    }
+
+    GdiplusShutdown(gdiplusToken);
+    gdiplusToken = NULL;
+
+    return bRet;
+}
+
+int Tool_GetEncoderClsid(const WCHAR* format, CLSID* pClsid)
+{
+    UINT  num = 0;          // number of image encoders
+    UINT  size = 0;         // size of the image encoder array in bytes
+
+    ImageCodecInfo* pImageCodecInfo = NULL;
+
+    GetImageEncodersSize(&num, &size);
+    if (size == 0)
+        return -1;  // Failure
+
+    pImageCodecInfo = (ImageCodecInfo*)(malloc(size));
+    if (pImageCodecInfo == NULL)
+        return -1;  // Failure
+
+    GetImageEncoders(num, size, pImageCodecInfo);
+
+    for (UINT j = 0; j < num; ++j)
+    {
+        if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0)
+        {
+            *pClsid = pImageCodecInfo[j].Clsid;
+            free(pImageCodecInfo);
+            return j;  // Success
+        }
+    }
+    free(pImageCodecInfo);
+    return -1;  // Failure
+}
+
+void Tool_ExcuteShellCMD(char* pChCommand)
+{
+    if (NULL == pChCommand)
+    {
+        return;
+    }
+    ShellExecute(NULL, "open", "C:\\WINDOWS\\system32\\cmd.exe", pChCommand, "", SW_HIDE);
+}
+
+bool Tool_OverlayStringToImg(unsigned char** pImgsrc, long srcSize,
+    unsigned char** pImgDest, long& DestSize,
+    wchar_t* DestString, int FontSize,
+    int x, int y, int colorR, int colorG, int colorB,
+    int compressQuality)
+{
+    if (!pImgsrc || !pImgDest || srcSize <= 0 || DestSize <= 0)
+    {
+        //WriteLog("传入参数为非法值");
+        return false;
+    }
+    if (wcslen(DestString) <= 0 || x < 0 || y < 0)
+    {
+        //WriteLog("字符串长度为0");
+        return false;
+    }
+
+    //构造图像	
+    IStream *pSrcStream = NULL;
+    IStream *pDestStream = NULL;
+    CreateStreamOnHGlobal(NULL, TRUE, &pSrcStream);
+    CreateStreamOnHGlobal(NULL, TRUE, &pDestStream);
+    if (!pSrcStream || !pDestStream)
+    {
+        //WriteLog("流创建失败.");
+        return false;
+    }
+    LARGE_INTEGER liTemp = { 0 };
+    pSrcStream->Seek(liTemp, STREAM_SEEK_SET, NULL);
+    pSrcStream->Write(*pImgsrc, srcSize, NULL);
+    Bitmap bmp(pSrcStream);
+    int iImgWith = bmp.GetWidth();
+    int iImgHeight = bmp.GetHeight();
+
+    Graphics grp(&bmp);
+
+    SolidBrush brush(Color(colorR, colorG, colorB));
+    FontFamily fontFamily(L"宋体");
+    //Gdiplus::Font font(&fontFamily, (REAL)FontSize);
+    Gdiplus::Font font(&fontFamily, (REAL)FontSize, FontStyleRegular, UnitPixel);
+
+    RectF layoutRect(x, y, iImgWith - x, 0);
+    RectF FinalRect;
+    INT codePointsFitted = 0;
+    INT linesFitted = 0;
+    int strLenth = wcslen(DestString);
+    grp.MeasureString(DestString, strLenth, &font, layoutRect, NULL, &FinalRect, &codePointsFitted, &linesFitted);
+    grp.DrawString(DestString, -1, &font, FinalRect, NULL, &brush);
+    Gdiplus::Status iState = grp.GetLastStatus();
+    if (iState == Ok)
+    {
+        //WriteLog("字符叠加成功");
+    }
+    else
+    {
+        //char chLog[260] = { 0 };
+        //sprintf(chLog, "字符叠加失败， 错误码为%d", iState);
+        //WriteLog(chLog);
+    }
+
+    pSrcStream->Seek(liTemp, STREAM_SEEK_SET, NULL);
+    pDestStream->Seek(liTemp, STREAM_SEEK_SET, NULL);
+
+    // 将位图按照JPG的格式保存到输出流中
+    CLSID jpgClsid;
+    Tool_GetEncoderClsid(L"image/jpeg", &jpgClsid);
+    int iQuality = compressQuality;
+    EncoderParameters encoderParameters;
+    encoderParameters.Count = 1;
+    encoderParameters.Parameter[0].Guid = EncoderQuality;
+    encoderParameters.Parameter[0].Type = EncoderParameterValueTypeLong;
+    encoderParameters.Parameter[0].NumberOfValues = 1;
+    encoderParameters.Parameter[0].Value = &iQuality;
+    bmp.Save(pDestStream, &jpgClsid, &encoderParameters);
+
+    ULARGE_INTEGER uiSize;
+    pDestStream->Seek(liTemp, STREAM_SEEK_CUR, &uiSize);
+    long iFinalSize = (long)uiSize.QuadPart;
+    if (iFinalSize <= DestSize)
+    {
+        pDestStream->Seek(liTemp, STREAM_SEEK_SET, NULL);
+        pDestStream->Read(*pImgDest, iFinalSize, NULL);
+        DestSize = iFinalSize;
+    }
+    else
+    {
+        DestSize = 0;
+        if (pSrcStream)
+        {
+            pSrcStream->Release();
+            pSrcStream = NULL;
+        }
+        if (pDestStream)
+        {
+            pDestStream->Release();
+            pDestStream = NULL;
+        }
+        //WriteLog("传入空间不足，字符叠加失败");
+        return false;
+    }
+
+    if (pSrcStream)
+    {
+        pSrcStream->Release();
+        pSrcStream = NULL;
+    }
+    if (pDestStream)
+    {
+        pDestStream->Release();
+        pDestStream = NULL;
+    }
+    return true;
 }
